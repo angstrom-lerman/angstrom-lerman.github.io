@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming FASTQ Read Length Selector</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 20px;
+            transition: border-color 0.3s;
+        }
+        .upload-area:hover {
+            border-color: #007bff;
+        }
+        .upload-area.dragover {
+            border-color: #007bff;
+            background-color: #f0f8ff;
+        }
+        .btn {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .btn:hover {
+            background-color: #0056b3;
+        }
+        .btn:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #007bff;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+        }
+        .selection-info {
+            background: #e8f4fd;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 10px 0;
+            border-left: 4px solid #007bff;
+        }
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin: 20px 0;
+        }
+        .progress {
+            width: 100%;
+            height: 20px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+            display: none;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #007bff;
+            transition: width 0.3s ease;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin: 15px 0;
+        }
+        .input-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .input-group input {
+            width: 80px;
+            padding: 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #log {
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+        .processing {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Streaming FASTQ Read Length Selector</h1>
+        <p>Upload large FASTQ files (supports multi-GB files) to visualize read length distribution and extract reads within specific size ranges.</p>
+        
+        <div class="upload-area" id="uploadArea">
+            <p>Drag and drop your FASTQ file here, or click to select</p>
+            <input type="file" id="fileInput" accept=".fastq,.fq" style="display: none;">
+            <button class="btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+            <p style="font-size: 12px; color: #666; margin-top: 10px;">
+                Note: Compressed (.gz) files not supported in browser. Large files are processed in streaming chunks.
+            </p>
+        </div>
+
+        <div class="progress" id="progressContainer">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+
+        <div id="processingInfo" class="processing" style="display: none;">
+            <div id="processingStats"></div>
+        </div>
+
+        <div id="fileInfo" style="display: none;">
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-value" id="totalReads">0</div>
+                    <div class="stat-label">Total Reads</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="avgLength">0</div>
+                    <div class="stat-label">Average Length (bp)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="medianLength">0</div>
+                    <div class="stat-label">Median Length (bp)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="n50">0</div>
+                    <div class="stat-label">N50 (bp)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="fileSize">0</div>
+                    <div class="stat-label">File Size (MB)</div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <div class="input-group">
+                    <label>Bin size:</label>
+                    <input type="number" id="binSize" value="100" min="10" max="1000">
+                </div>
+                <div class="input-group">
+                    <label>View range:</label>
+                    <input type="number" id="minLength" value="0" min="0" placeholder="Min">
+                    <input type="number" id="maxLength" value="18000" min="1000" placeholder="Max">
+                </div>
+                <button class="btn" onclick="updateHistogram()">Update Chart</button>
+                <button class="btn" onclick="resetZoom()">Reset Zoom</button>
+                <button class="btn" onclick="clearSelection()">Clear Selection</button>
+            </div>
+
+            <div class="chart-container">
+                <canvas id="histogramChart"></canvas>
+            </div>
+
+            <div id="selectionInfo" style="display: none;" class="selection-info">
+                <h3>Selection Range</h3>
+                <p><strong>Length range:</strong> <span id="rangeText"></span></p>
+                <p><strong>Estimated reads in range:</strong> <span id="selectedCount"></span></p>
+                <button class="btn" id="exportBtn" onclick="exportSelectedReads()">Export Selected Reads to FASTQ</button>
+                <p style="font-size: 12px; color: #666; margin-top: 10px;">
+                    Note: Export will re-process the file to extract selected reads.
+                </p>
+            </div>
+        </div>
+
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let lengthHistogram = new Map();
+        let chart = null;
+        let isSelecting = false;
+        let selectionStart = null;
+        let selectionEnd = null;
+        let fileStats = {
+            totalReads: 0,
+            totalLength: 0,
+            lengths: [],
+            maxLength: 0,
+            minLength: Infinity
+        };
+        let currentFile = null;
+        let isProcessing = false;
+
+        // File handling
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function log(message) {
+            const logEl = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logEl.innerHTML += `[${timestamp}] ${message}\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateProgress(percent) {
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            progressContainer.style.display = 'block';
+            progressBar.style.width = percent + '%';
+        }
+
+        function hideProgress() {
+            document.getElementById('progressContainer').style.display = 'none';
+        }
+
+        function updateProcessingInfo(stats) {
+            const info = document.getElementById('processingInfo');
+            const statsEl = document.getElementById('processingStats');
+            statsEl.innerHTML = `
+                Processing: ${stats.reads.toLocaleString()} reads processed, 
+                ${(stats.bytesRead / 1024 / 1024).toFixed(1)} MB read
+            `;
+            info.style.display = 'block';
+        }
+
+        async function handleFile(file) {
+            if (isProcessing) {
+                log("Already processing a file. Please wait...");
+                return;
+            }
+
+            currentFile = file;
+            log(`Loading file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+            
+            if (file.name.endsWith('.gz')) {
+                log("ERROR: Compressed (.gz) files are not supported in browser. Please decompress first.");
+                return;
+            }
+
+            isProcessing = true;
+            resetData();
+            
+            try {
+                await streamParseFastq(file);
+                isProcessing = false;
+            } catch (error) {
+                log(`ERROR: ${error.message}`);
+                isProcessing = false;
+                hideProgress();
+                document.getElementById('processingInfo').style.display = 'none';
+            }
+        }
+
+        function resetData() {
+            lengthHistogram.clear();
+            fileStats = {
+                totalReads: 0,
+                totalLength: 0,
+                lengths: [],
+                maxLength: 0,
+                minLength: Infinity
+            };
+            clearSelection();
+            document.getElementById('fileInfo').style.display = 'none';
+            document.getElementById('processingInfo').style.display = 'none';
+        }
+
+        async function streamParseFastq(file) {
+            const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+            const reader = file.stream().getReader();
+            const decoder = new TextDecoder();
+            
+            let buffer = '';
+            let bytesRead = 0;
+            let readCount = 0;
+            let currentRead = null;
+            let lineCount = 0;
+            let lastUpdateTime = Date.now();
+
+            log("Starting streaming parse...");
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    bytesRead += value.byteLength;
+                    buffer += decoder.decode(value, { stream: true });
+                    
+                    // Process complete lines
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || ''; // Keep incomplete line in buffer
+                    
+                    for (const line of lines) {
+                        const trimmedLine = line.trim();
+                        if (!trimmedLine) continue;
+                        
+                        lineCount++;
+                        
+                        // FASTQ parsing state machine
+                        if (currentRead === null) {
+                            if (trimmedLine.startsWith('@')) {
+                                currentRead = { header: trimmedLine, state: 'sequence' };
+                            }
+                        } else if (currentRead.state === 'sequence') {
+                            if (!trimmedLine.startsWith('@') && !trimmedLine.startsWith('+')) {
+                                currentRead.sequence = trimmedLine;
+                                currentRead.length = trimmedLine.length;
+                                currentRead.state = 'plus';
+                            }
+                        } else if (currentRead.state === 'plus') {
+                            if (trimmedLine.startsWith('+')) {
+                                currentRead.state = 'quality';
+                            }
+                        } else if (currentRead.state === 'quality') {
+                            // Complete read
+                            processRead(currentRead);
+                            readCount++;
+                            currentRead = null;
+                        }
+                    }
+                    
+                    // Update progress and stats periodically
+                    const now = Date.now();
+                    if (now - lastUpdateTime > 500) { // Update every 500ms
+                        const progress = (bytesRead / file.size) * 100;
+                        updateProgress(progress);
+                        updateProcessingInfo({
+                            reads: readCount,
+                            bytesRead: bytesRead
+                        });
+                        
+                        // Allow UI to update
+                        await new Promise(resolve => setTimeout(resolve, 1));
+                        lastUpdateTime = now;
+                    }
+                }
+                
+                // Process any remaining data in buffer
+                if (buffer.trim() && currentRead && currentRead.state === 'quality') {
+                    processRead(currentRead);
+                    readCount++;
+                }
+
+            } finally {
+                reader.releaseLock();
+            }
+
+            log(`Streaming parse complete: ${readCount} reads processed`);
+            hideProgress();
+            document.getElementById('processingInfo').style.display = 'none';
+            
+            if (readCount === 0) {
+                log("ERROR: No valid FASTQ reads found. Check file format.");
+                return;
+            }
+
+            finalizeParsing();
+        }
+
+        function processRead(read) {
+            if (!read.length || read.length < 1) return;
+            
+            // Update histogram
+            const count = lengthHistogram.get(read.length) || 0;
+            lengthHistogram.set(read.length, count + 1);
+            
+            // Update stats
+            fileStats.totalReads++;
+            fileStats.totalLength += read.length;
+            fileStats.maxLength = Math.max(fileStats.maxLength, read.length);
+            fileStats.minLength = Math.min(fileStats.minLength, read.length);
+            
+            // Sample lengths for median/N50 calculation (to avoid memory issues)
+            if (fileStats.lengths.length < 100000 || Math.random() < 0.01) {
+                fileStats.lengths.push(read.length);
+            }
+        }
+
+        function finalizeParsing() {
+            calculateStats();
+            
+            // Set default zoom range based on data
+            const maxDataLength = Math.max(...lengthHistogram.keys());
+            const defaultMax = Math.min(18000, maxDataLength + 1000);
+            
+            document.getElementById('minLength').value = 0;
+            document.getElementById('maxLength').value = defaultMax;
+            
+            createHistogram();
+            document.getElementById('fileInfo').style.display = 'block';
+            log("Analysis complete. Adjust view range and click Update Chart to zoom. Click histogram bins to select ranges.");
+        }
+
+        function calculateStats() {
+            const avg = Math.round(fileStats.totalLength / fileStats.totalReads);
+            
+            // Sort sampled lengths for median and N50
+            fileStats.lengths.sort((a, b) => a - b);
+            const sampleCount = fileStats.lengths.length;
+            const median = fileStats.lengths[Math.floor(sampleCount / 2)];
+            
+            // Estimate N50 from sample
+            const halfTotalLength = fileStats.totalLength / 2;
+            let runningLength = 0;
+            let n50 = 0;
+            
+            // Use actual histogram for more accurate N50
+            const sortedLengths = Array.from(lengthHistogram.keys()).sort((a, b) => b - a);
+            for (const length of sortedLengths) {
+                const count = lengthHistogram.get(length);
+                runningLength += length * count;
+                if (runningLength >= halfTotalLength) {
+                    n50 = length;
+                    break;
+                }
+            }
+            
+            document.getElementById('totalReads').textContent = fileStats.totalReads.toLocaleString();
+            document.getElementById('avgLength').textContent = avg.toLocaleString();
+            document.getElementById('medianLength').textContent = median.toLocaleString();
+            document.getElementById('n50').textContent = n50.toLocaleString();
+            document.getElementById('fileSize').textContent = (currentFile.size / 1024 / 1024).toFixed(1);
+        }
+
+        function createHistogram() {
+            const binSize = parseInt(document.getElementById('binSize').value);
+            const minLength = parseInt(document.getElementById('minLength').value) || 0;
+            const maxLength = parseInt(document.getElementById('maxLength').value) || 18000;
+            
+            // Create bins only for the visible range
+            const rangeLength = maxLength - minLength;
+            const numBins = Math.ceil(rangeLength / binSize);
+            const bins = new Array(numBins).fill(0);
+            const binLabels = [];
+            
+            for (let i = 0; i < numBins; i++) {
+                const binStart = minLength + (i * binSize);
+                binLabels.push(binStart);
+            }
+            
+            // Fill bins from length histogram within the visible range
+            for (const [length, count] of lengthHistogram) {
+                if (length >= minLength && length <= maxLength) {
+                    const binIndex = Math.floor((length - minLength) / binSize);
+                    if (binIndex >= 0 && binIndex < bins.length) {
+                        bins[binIndex] += count;
+                    }
+                }
+            }
+            
+            // Create chart
+            const ctx = document.getElementById('histogramChart').getContext('2d');
+            
+            if (chart) {
+                chart.destroy();
+            }
+            
+            chart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: binLabels,
+                    datasets: [{
+                        label: 'Read Count',
+                        data: bins,
+                        backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: `Read Length (bp) - Range: ${minLength} to ${maxLength} bp`
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Read Count'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            callbacks: {
+                                title: function(context) {
+                                    const binIndex = context[0].dataIndex;
+                                    const actualBinStart = minLength + (binIndex * binSize);
+                                    const actualBinEnd = actualBinStart + binSize - 1;
+                                    
+                                    if (binSize === 1) {
+                                        return `Length: ${actualBinStart} bp`;
+                                    } else {
+                                        return `Length: ${actualBinStart}-${actualBinEnd} bp`;
+                                    }
+                                },
+                                label: function(context) {
+                                    return `Reads: ${context.parsed.y.toLocaleString()}`;
+                                }
+                            }
+                        }
+                    },
+                    onClick: (event, elements) => {
+                        if (elements.length > 0) {
+                            const binIndex = elements[0].index;
+                            const binStart = minLength + (binIndex * binSize);
+                            const binEnd = binSize === 1 ? binStart : binStart + binSize - 1;
+                            
+                            if (!isSelecting) {
+                                selectionStart = binStart;
+                                selectionEnd = binEnd;
+                                isSelecting = true;
+                                if (binSize === 1) {
+                                    log(`Selected length: ${binStart} bp`);
+                                } else {
+                                    log(`Started selection at ${binStart}-${binEnd} bp`);
+                                }
+                            } else {
+                                selectionEnd = binEnd;
+                                if (selectionStart > selectionEnd) {
+                                    [selectionStart, selectionEnd] = [selectionEnd, selectionStart];
+                                }
+                                log(`Extended selection to ${selectionStart}-${selectionEnd} bp`);
+                            }
+                            updateSelection();
+                        }
+                    }
+                }
+            });
+            
+            // Restore selection highlight if it exists
+            if (selectionStart !== null && selectionEnd !== null) {
+                highlightSelection();
+            }
+        }
+
+        function updateSelection() {
+            if (selectionStart === null || selectionEnd === null) return;
+            
+            // Estimate reads in selected range from histogram
+            let selectedCount = 0;
+            for (const [length, count] of lengthHistogram) {
+                if (length >= selectionStart && length <= selectionEnd) {
+                    selectedCount += count;
+                }
+            }
+            
+            document.getElementById('rangeText').textContent = 
+                `${selectionStart} - ${selectionEnd} bp`;
+            document.getElementById('selectedCount').textContent = 
+                selectedCount.toLocaleString();
+            document.getElementById('selectionInfo').style.display = 'block';
+            
+            highlightSelection();
+        }
+
+        function highlightSelection() {
+            if (!chart || selectionStart === null || selectionEnd === null) return;
+            
+            const binSize = parseInt(document.getElementById('binSize').value);
+            const minLength = parseInt(document.getElementById('minLength').value) || 0;
+            
+            const startBin = Math.floor((selectionStart - minLength) / binSize);
+            const endBin = Math.floor((selectionEnd - minLength) / binSize);
+            
+            const colors = chart.data.datasets[0].backgroundColor;
+            for (let i = 0; i < colors.length; i++) {
+                colors[i] = 'rgba(54, 162, 235, 0.6)';
+            }
+            
+            // Only highlight bins that are visible in current range
+            for (let i = Math.max(0, startBin); i <= Math.min(endBin, colors.length - 1); i++) {
+                colors[i] = 'rgba(255, 99, 132, 0.8)';
+            }
+            
+            chart.update('none');
+        }
+
+        function clearSelection() {
+            selectionStart = null;
+            selectionEnd = null;
+            isSelecting = false;
+            document.getElementById('selectionInfo').style.display = 'none';
+            
+            if (chart) {
+                const colors = chart.data.datasets[0].backgroundColor;
+                for (let i = 0; i < colors.length; i++) {
+                    colors[i] = 'rgba(54, 162, 235, 0.6)';
+                }
+                chart.update('none');
+            }
+            
+            log("Selection cleared");
+        }
+
+        function resetZoom() {
+            if (lengthHistogram.size === 0) return;
+            
+            const maxDataLength = Math.max(...lengthHistogram.keys());
+            const defaultMax = Math.min(18000, maxDataLength + 1000);
+            
+            document.getElementById('minLength').value = 0;
+            document.getElementById('maxLength').value = defaultMax;
+            
+            updateHistogram();
+            log("Zoom reset to default range");
+        }
+
+        function updateHistogram() {
+            if (lengthHistogram.size > 0) {
+                createHistogram();
+                log("Histogram updated");
+            }
+        }
+
+        async function exportSelectedReads() {
+            if (!currentFile || selectionStart === null || selectionEnd === null) {
+                alert("No selection to export");
+                return;
+            }
+            
+            log(`Exporting reads in range ${selectionStart}-${selectionEnd} bp...`);
+            
+            try {
+                await exportReadsFromFile(currentFile, selectionStart, selectionEnd);
+            } catch (error) {
+                log(`Export error: ${error.message}`);
+            }
+        }
+
+        async function exportReadsFromFile(file, minLength, maxLength) {
+            const CHUNK_SIZE = 1024 * 1024;
+            const reader = file.stream().getReader();
+            const decoder = new TextDecoder();
+            
+            let buffer = '';
+            let bytesRead = 0;
+            let exportedReads = 0;
+            let currentRead = null;
+            let exportContent = '';
+            let lastUpdateTime = Date.now();
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    bytesRead += value.byteLength;
+                    buffer += decoder.decode(value, { stream: true });
+                    
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    
+                    for (const line of lines) {
+                        const trimmedLine = line.trim();
+                        if (!trimmedLine) continue;
+                        
+                        if (currentRead === null) {
+                            if (trimmedLine.startsWith('@')) {
+                                currentRead = { 
+                                    header: trimmedLine, 
+                                    state: 'sequence',
+                                    lines: [trimmedLine]
+                                };
+                            }
+                        } else if (currentRead.state === 'sequence') {
+                            if (!trimmedLine.startsWith('@') && !trimmedLine.startsWith('+')) {
+                                currentRead.sequence = trimmedLine;
+                                currentRead.length = trimmedLine.length;
+                                currentRead.state = 'plus';
+                                currentRead.lines.push(trimmedLine);
+                            }
+                        } else if (currentRead.state === 'plus') {
+                            if (trimmedLine.startsWith('+')) {
+                                currentRead.state = 'quality';
+                                currentRead.lines.push(trimmedLine);
+                            }
+                        } else if (currentRead.state === 'quality') {
+                            currentRead.lines.push(trimmedLine);
+                            
+                            // Check if read is in range
+                            if (currentRead.length >= minLength && currentRead.length <= maxLength) {
+                                exportContent += currentRead.lines.join('\n') + '\n';
+                                exportedReads++;
+                            }
+                            
+                            currentRead = null;
+                        }
+                    }
+                    
+                    // Update progress
+                    const now = Date.now();
+                    if (now - lastUpdateTime > 1000) {
+                        const progress = (bytesRead / file.size) * 100;
+                        updateProgress(progress);
+                        log(`Export progress: ${progress.toFixed(1)}% - ${exportedReads} reads found`);
+                        await new Promise(resolve => setTimeout(resolve, 1));
+                        lastUpdateTime = now;
+                    }
+                }
+                
+                // Process final read if exists
+                if (buffer.trim() && currentRead && currentRead.state === 'quality') {
+                    currentRead.lines.push(buffer.trim());
+                    if (currentRead.length >= minLength && currentRead.length <= maxLength) {
+                        exportContent += currentRead.lines.join('\n') + '\n';
+                        exportedReads++;
+                    }
+                }
+
+            } finally {
+                reader.releaseLock();
+            }
+
+            hideProgress();
+
+            if (exportedReads === 0) {
+                log("No reads found in selected range");
+                return;
+            }
+
+            // Download the file
+            const blob = new Blob([exportContent], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `selected_reads_${minLength}-${maxLength}bp.fastq`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            log(`Exported ${exportedReads} reads to selected_reads_${minLength}-${maxLength}bp.fastq`);
+        }
+
+        // Initialize
+        log("Streaming FASTQ Read Length Selector ready. Supports large files up to several GB.");
+    </script>
+</body>
+</html>
