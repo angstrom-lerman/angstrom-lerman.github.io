@@ -142,10 +142,10 @@
         
         <div class="upload-area" id="uploadArea">
             <p>Drag and drop your FASTQ file here, or click to select</p>
-            <input type="file" id="fileInput" accept=".fastq,.fq" style="display: none;">
+            <input type="file" id="fileInput" accept=".fastq,.fq,.fastq.gz,.fq.gz,.gz" style="display: none;">
             <button class="btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
             <p style="font-size: 12px; color: #666; margin-top: 10px;">
-                Note: Compressed (.gz) files not supported in browser. Large files are processed in streaming chunks.
+                Supports both uncompressed (.fastq, .fq) and gzip-compressed (.fastq.gz, .fq.gz) files. Large files are processed in streaming chunks.
             </p>
         </div>
 
@@ -176,8 +176,8 @@
                     <div class="stat-label">N50 (bp)</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value" id="fileSize">0</div>
-                    <div class="stat-label">File Size (MB)</div>
+                    <div class="stat-value" id="totalBases">0</div>
+                    <div class="stat-label">Total Bases (Mb)</div>
                 </div>
             </div>
 
@@ -295,16 +295,16 @@
             currentFile = file;
             log(`Loading file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
             
-            if (file.name.endsWith('.gz')) {
-                log("ERROR: Compressed (.gz) files are not supported in browser. Please decompress first.");
-                return;
+            const isGzipped = file.name.endsWith('.gz');
+            if (isGzipped) {
+                log("Detected gzip compression - will decompress during processing");
             }
 
             isProcessing = true;
             resetData();
             
             try {
-                await streamParseFastq(file);
+                await streamParseFastq(file, isGzipped);
                 isProcessing = false;
             } catch (error) {
                 log(`ERROR: ${error.message}`);
@@ -328,9 +328,16 @@
             document.getElementById('processingInfo').style.display = 'none';
         }
 
-        async function streamParseFastq(file) {
+        async function streamParseFastq(file, isGzipped = false) {
             const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
-            const reader = file.stream().getReader();
+            let stream = file.stream();
+            
+            // Add decompression stream if file is gzipped
+            if (isGzipped) {
+                stream = stream.pipeThrough(new DecompressionStream('gzip'));
+            }
+            
+            const reader = stream.getReader();
             const decoder = new TextDecoder();
             
             let buffer = '';
@@ -483,7 +490,7 @@
             document.getElementById('avgLength').textContent = avg.toLocaleString();
             document.getElementById('medianLength').textContent = median.toLocaleString();
             document.getElementById('n50').textContent = n50.toLocaleString();
-            document.getElementById('fileSize').textContent = (currentFile.size / 1024 / 1024).toFixed(1);
+            document.getElementById('totalBases').textContent = (fileStats.totalLength / 1000000).toFixed(1);
         }
 
         function createHistogram() {
@@ -701,7 +708,14 @@
 
         async function exportReadsFromFile(file, minLength, maxLength) {
             const CHUNK_SIZE = 1024 * 1024;
-            const reader = file.stream().getReader();
+            const isGzipped = file.name.endsWith('.gz');
+            
+            let stream = file.stream();
+            if (isGzipped) {
+                stream = stream.pipeThrough(new DecompressionStream('gzip'));
+            }
+            
+            const reader = stream.getReader();
             const decoder = new TextDecoder();
             
             let buffer = '';
